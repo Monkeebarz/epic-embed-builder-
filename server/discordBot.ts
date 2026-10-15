@@ -32,6 +32,20 @@ import { EPIC_LOGO_PATH } from "../shared/const";
 
 const RSVP_EMOJI = "✅";
 
+export function buildRsvpAttendeeField(
+  attendees: ReadonlyArray<{ discord_user_id: string; discord_username: string | null }>,
+  maxAttendees: number | null,
+) {
+  const count = attendees.length;
+  const maxLabel = maxAttendees ? `/${maxAttendees}` : "";
+  const value = count === 0
+    ? "_No one has RSVPed yet. React below to join!_"
+    : attendees
+        .map((a, i) => `${i + 1}. ${a.discord_username ? `**${a.discord_username}**` : `<@${a.discord_user_id}>`}`)
+        .join("\n");
+  return { name: `👥 Players (${count}${maxLabel})`, value, inline: false };
+}
+
 /**
  * Public origin of this app (captured from incoming requests). Kept available
  * for building absolute URLs (e.g. OG image) if needed server-side.
@@ -161,12 +175,15 @@ export function buildEmbed(input: SendEmbedInput): EmbedBuilder {
     embed.setTimestamp(new Date(input.eventTimeUtc));
   }
   if (input.rsvpEnabled) {
-    const lines: string[] = [`React with ${RSVP_EMOJI} to RSVP!`];
+    const lines: string[] = ["React below to RSVP!"];
     if (input.maxAttendees) lines.push(`Max attendees: **${input.maxAttendees}**`);
     if (input.rsvpDeadlineUtc) {
       lines.push(`RSVP by <t:${Math.floor(input.rsvpDeadlineUtc / 1000)}:F>`);
     }
-    embed.addFields({ name: "🎟️ RSVP", value: lines.join("\n"), inline: false });
+    embed.addFields(
+      { name: "🎟️ RSVP", value: lines.join("\n"), inline: false },
+      buildRsvpAttendeeField([], input.maxAttendees),
+    );
   }
   return embed;
 }
@@ -238,13 +255,24 @@ export async function processRsvpJoin(
     if (count >= event.max_attendees) return;
   }
   const added = await addAttendee(event.id, userId, username);
-  if (!added) return; // already RSVP'd — don't re-DM
+  if (!added) {
+    // A duplicate reaction can still repair a stale/missing attendee field.
+    await updateEmbedAttendeeList(event).catch(err =>
+      console.error("[Discord] failed to refresh existing RSVP list:", err),
+    );
+    return; // already RSVP'd — don't re-DM
+  }
 
-  const guild = await getGuild();
+  // Update the visible list immediately after persistence; DM/role side effects
+  // must not block or prevent the embed from reflecting the RSVP.
+  await updateEmbedAttendeeList(event).catch(err =>
+    console.error("[Discord] failed to update embed attendee list:", err),
+  );
 
   // Auto-assign role
   if (event.auto_assign_role_id) {
     try {
+      const guild = await getGuild();
       const member = await guild.members.fetch(userId);
       await member.roles.add(event.auto_assign_role_id);
     } catch (err) {
@@ -267,10 +295,6 @@ export async function processRsvpJoin(
     console.error("[Discord] failed to send RSVP confirmation DM:", err);
   }
 
-  // Update the embed with the live attendee list
-  await updateEmbedAttendeeList(event).catch(err =>
-    console.error("[Discord] failed to update embed attendee list:", err),
-  );
 }
 
 export async function processRsvpLeave(event: RsvpEvent, userId: string): Promise<void> {
@@ -303,16 +327,6 @@ export async function updateEmbedAttendeeList(event: RsvpEvent): Promise<void> {
   if (!message || !message.embeds[0]) return;
 
   const attendees = await listAttendees(event.id);
-  const count = attendees.length;
-  const maxLabel = event.max_attendees ? `/${event.max_attendees}` : "";
-  const fieldName = `👥 Players (${count}${maxLabel})`;
-  const fieldValue =
-    count === 0
-      ? "_No one has RSVPed yet. React with ✅ to join!_"
-      : attendees
-          .map((a, i) => `${i + 1}. ${a.discord_username ? `**${a.discord_username}**` : `<@${a.discord_user_id}>`}`)
-          .join("\n");
-
   // Rebuild the embed from the existing one, replacing/adding the Players field.
   const existing = message.embeds[0];
   const rebuilt = EmbedBuilder.from(existing);
@@ -321,7 +335,7 @@ export async function updateEmbedAttendeeList(event: RsvpEvent): Promise<void> {
   const fields = (existing.fields ?? []).filter(f => !f.name.startsWith("👥 Players"));
   rebuilt.setFields([
     ...fields,
-    { name: fieldName, value: fieldValue, inline: false },
+    buildRsvpAttendeeField(attendees, event.max_attendees),
   ]);
 
   await message.edit({ embeds: [rebuilt] });

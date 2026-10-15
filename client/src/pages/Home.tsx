@@ -530,7 +530,7 @@ export default function Home({ onLogout }: { onLogout?: () => Promise<void> | vo
                               <div className="mt-2">
                                 <div className="text-[#f2f3f5] text-xs font-semibold">🎟️ RSVP</div>
                                 <div className="text-[#dbdee1] text-sm">
-                                  React with ✅ to RSVP!
+                                  React below to RSVP!
                                   {form.maxAttendees && (
                                     <> Max attendees: <b>{form.maxAttendees}</b>.</>
                                   )}
